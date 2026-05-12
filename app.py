@@ -1,28 +1,22 @@
-import sys
-import io
 import os
+import requests
 from flask import Flask, render_template, request, jsonify
-from transformers import pipeline
 import pdfplumber
 from werkzeug.utils import secure_filename
 
-# Set stdout to UTF-8 for Windows compatibility
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+app.config['UPLOAD_FOLDER'] = '/tmp'  # Vercel allows writing to /tmp
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Ensure upload folder exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Hugging Face API Configuration
+API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+# Get token from environment variable
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Load text generation model once at startup
-print("Loading AI model...")
-generator = pipeline(
-    "text-generation",
-    model="gpt2"
-)
-print("Model loaded successfully.")
+def query_huggingface(payload):
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+    response = requests.post(API_URL, headers=headers, json=payload)
+    return response.json()
 
 @app.route('/')
 def index():
@@ -52,29 +46,32 @@ def summarize():
                         text += extracted
             
             # Clean up file after reading
-            os.remove(filepath)
+            if os.path.exists(filepath):
+                os.remove(filepath)
             
             if not text.strip():
                 return jsonify({'error': 'Could not extract text from PDF'}), 400
 
-            # Reduce text size for GPT-2 context window
-            text_preview = text[:1000]
+            # BART model works best with up to 1024 tokens
+            text_input = text[:3000] 
             
-            # Generate summary
-            prompt = f"Summarize this text:\n{text_preview}"
-            result = generator(
-                prompt,
-                max_new_tokens=150,
-                do_sample=False,
-                pad_token_id=50256
-            )
-            
-            summary = result[0]['generated_text']
-            # Optionally remove the prompt from the output if it's included
-            if summary.startswith(prompt):
-                summary = summary[len(prompt):].strip()
-            
-            return jsonify({'summary': summary})
+            # Call Hugging Face API
+            output = query_huggingface({
+                "inputs": text_input,
+                "parameters": {"max_length": 150, "min_length": 40, "do_sample": False}
+            })
+
+            # Handle API responses
+            if isinstance(output, list) and len(output) > 0:
+                summary = output[0].get('summary_text', 'No summary generated')
+                return jsonify({'summary': summary})
+            elif isinstance(output, dict) and 'error' in output:
+                # If model is loading, tell user to wait
+                if "estimated_time" in output:
+                    return jsonify({'error': 'Model is starting up on Hugging Face. Please try again in 20 seconds.'}), 503
+                return jsonify({'error': output['error']}), 500
+            else:
+                return jsonify({'error': 'Unexpected response from AI service'}), 500
             
         except Exception as e:
             if os.path.exists(filepath):
