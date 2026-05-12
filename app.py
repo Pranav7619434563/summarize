@@ -14,9 +14,21 @@ API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 def query_huggingface(payload):
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-    response = requests.post(API_URL, headers=headers, json=payload)
-    return response.json()
+    if not HF_TOKEN:
+        return {"error": "Hugging Face Token (HF_TOKEN) is missing. Please add it to Vercel Environment Variables."}
+        
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    try:
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        
+        # Check if the response is actually JSON
+        try:
+            return response.json()
+        except ValueError:
+            return {"error": f"API returned non-JSON response (Status {response.status_code}): {response.text[:100]}"}
+            
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Connection to Hugging Face failed: {str(e)}"}
 
 @app.route('/')
 def index():
@@ -62,16 +74,16 @@ def summarize():
             })
 
             # Handle API responses
-            if isinstance(output, list) and len(output) > 0:
-                summary = output[0].get('summary_text', 'No summary generated')
+            if isinstance(output, list) and len(output) > 0 and 'summary_text' in output[0]:
+                summary = output[0]['summary_text']
                 return jsonify({'summary': summary})
             elif isinstance(output, dict) and 'error' in output:
                 # If model is loading, tell user to wait
                 if "estimated_time" in output:
-                    return jsonify({'error': 'Model is starting up on Hugging Face. Please try again in 20 seconds.'}), 503
+                    return jsonify({'error': 'AI model is starting up on Hugging Face. This takes about 30 seconds for the first request. Please try again in a moment.'}), 503
                 return jsonify({'error': output['error']}), 500
             else:
-                return jsonify({'error': 'Unexpected response from AI service'}), 500
+                return jsonify({'error': f'AI Service Error: {str(output)}'}), 500
             
         except Exception as e:
             if os.path.exists(filepath):
